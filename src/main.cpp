@@ -1,24 +1,13 @@
 #include <Windows.h>
 #include <unordered_map>
 #include <vector>
+#include <Utilities.h>
 #include <MathUtils.h>
 #include <Havok.h>
 #define HAVOKtoFO4 69.99124f
 using namespace RE;
 using std::unordered_map;
 using std::vector;
-
-char tempbuf[8192] = { 0 };
-char* _MESSAGE(const char* fmt, ...) {
-	va_list args;
-
-	va_start(args, fmt);
-	vsnprintf(tempbuf, sizeof(tempbuf), fmt, args);
-	va_end(args);
-	spdlog::log(spdlog::level::warn, tempbuf);
-
-	return tempbuf;
-}
 
 class VelocityData {
 public:
@@ -30,36 +19,22 @@ public:
 		x = 0.0f;
 		y = 0.0f;
 		z = 0.0f;
-		duration = 0.0f;
-		stepX = 0.0f;
-		stepY = 0.0f;
-		stepZ = 0.0f;
+		duration = 0.f;
+		stepX = 0.f;
+		stepY = 0.f;
+		stepZ = 0.f;
+		lastRun = 0.f;
 	}
 };
 
-REL::Relocation<float*> ptr_engineTime{ REL::ID(599343) };
+REL::Relocation<uintptr_t> ptr_RunActorUpdates{ REL::ID(556439), 0x17 };
+uintptr_t RunActorUpdatesOrig;
 const float VelocityData::stepTime = 0.016667f;
 unordered_map<Actor*, VelocityData> velMap;
 unordered_map<Actor*, VelocityData> queueMap;
 PlayerCharacter* p;
 BSSpinLock mapLock;
 Setting* charGravity;
-
-template<class Ty>
-Ty SafeWrite64Function(uintptr_t addr, Ty data) {
-	DWORD oldProtect;
-	void* _d[2];
-	memcpy(_d, &data, sizeof(data));
-	size_t len = sizeof(_d[0]);
-
-	VirtualProtect((void*)addr, len, PAGE_EXECUTE_READWRITE, &oldProtect);
-	Ty olddata;
-	memset(&olddata, 0, sizeof(Ty));
-	memcpy(&olddata, (void*)addr, len);
-	memcpy((void*)addr, &_d[0], len);
-	VirtualProtect((void*)addr, len, oldProtect, &oldProtect);
-	return olddata;
-}
 
 bool IsOnGround(bhkCharacterController* con) {
 	return (con->flags & 0x100) == 0x100 || con->context.currentState == hknpCharacterState::hknpCharacterStateType::kOnGround;
@@ -80,142 +55,107 @@ float ApplyVelocity(Actor* a, VelocityData& vd, bool modifyState = false) {
 	NiPointer<bhkCharacterController> con = a->currentProcess->middleHigh->charController;
 	if (!con.get())
 		return 0;
-	float deltaTime = *ptr_engineTime - vd.lastRun;
-	if (vd.additive) {
+	float deltaTime = *F4::ptr_engineTime - vd.lastRun;
+
+	if (!UI::GetSingleton()->menuMode) {
 		uintptr_t charProxy = *(uintptr_t*)((uintptr_t)con.get() + 0x470);
 		if (charProxy) {
-			con->context.currentState = hknpCharacterState::hknpCharacterStateType::kInAir;
-			//con->velocityMod = hkVector4f(vd.x, vd.y, vd.z) * HAVOKtoFO4;
-			if (IsOnGround(a)) {
+			hkVector4f* charProxyVel = (hkVector4f*)(charProxy + 0xA0);
+			con->velocityTime = con->stepInfo.deltaTime.storage;
+			con->flags &= 0xFFFFF8FF;
+			con->fallStartHeight = a->data.location.z;
+			con->fallTime = 0;
+			if (IsOnGround(con.get())) {
 				hkTransform* charProxyTransform = (hkTransform*)(charProxy + 0x40);
-				charProxyTransform->m_translation.z += 0.1f;
+				charProxyTransform->m_translation.v.z += 0.1f;
 			}
-			else {
-				hkVector4f* charProxyVel = (hkVector4f*)(charProxy + 0xA0);
+			if (modifyState) {
+				if (con->context.currentState != hknpCharacterState::hknpCharacterStateType::kInAir) {
+					con->wantState = hknpCharacterState::hknpCharacterStateType::kInAir;
+					con->context.currentState = hknpCharacterState::hknpCharacterStateType::kInAir;
+					con->UpdateState();
+				}
+			}
+			if (vd.additive) {
+				//_MESSAGE("Actor %llx Controller %llx x %f y % f z %f onGround %d", a, con.get(), vd.x, vd.y, vd.z, (con->flags & 0x100) == 0x100);
 				charProxyVel->x += vd.x;
 				charProxyVel->y += vd.y;
 				charProxyVel->z += vd.z;
 				vd.x = 0;
 				vd.y = 0;
 				vd.z = 0;
-				con->flags &= 0xFFFFF8FF;
-			}
-			//_MESSAGE("Actor %llx Controller %llx x %f y % f z %f onGround %d", a, con.get(), vd.x, vd.y, vd.z, (con->flags & 0x100) == 0x100);
-		}
-	}
-	else {
-		if (vd.gravity) {
-			if (!IsOnGround(con.get())) {
-				vd.z -= con->gravity * charGravity->GetFloat() * 9.81f * deltaTime / VelocityData::stepTime;
-			}
-		}
-		//_MESSAGE("Actor %llx Controller %llx x %f y % f z %f onGround %d", a, con.get(), vd.x, vd.y, vd.z, (con->flags & 0x100) == 0x100);
-		con->velocityMod = hkVector4f(vd.x, vd.y, vd.z);
-		con->velocityTime = con->stepInfo.deltaTime.storage;
-		vd.x += vd.stepX * deltaTime / VelocityData::stepTime;
-		vd.y += vd.stepY * deltaTime / VelocityData::stepTime;
-		vd.z += vd.stepZ * deltaTime / VelocityData::stepTime;
-		con->flags = con->flags & ~((uint32_t)0xFF00) | (uint32_t)0x8700;
-		if (modifyState) {
-			con->context.currentState = hknpCharacterState::hknpCharacterStateType::kInAir;
-		}
-		else {
-			if (con->context.currentState == hknpCharacterState::hknpCharacterStateType::kOnGround) {
-				uintptr_t charProxy = *(uintptr_t*)((uintptr_t)con.get() + 0x470);
-				if (charProxy) {
-					hkTransform* charProxyTransform = (hkTransform*)(charProxy + 0x40);
-					charProxyTransform->m_translation.z += 0.1f;
+				//_MESSAGE("Actor %llx Controller %llx x %f y % f z %f onGround %d", a, con.get(), charProxyVel->x, charProxyVel->y, charProxyVel->z, (con->flags & 0x100) == 0x100);
+			} else {
+				if (vd.gravity) {
+					if (!IsOnGround(con.get())) {
+						vd.z -= con->gravity * charGravity->GetFloat() * 9.81f * deltaTime / VelocityData::stepTime;
+					}
 				}
+				//_MESSAGE("Actor %llx Controller %llx x %f y % f z %f onGround %d", a, con.get(), vd.x, vd.y, vd.z, (con->flags & 0x100) == 0x100);
+				charProxyVel->x = vd.x;
+				charProxyVel->y = vd.y;
+				charProxyVel->z = vd.z;
+				vd.x += vd.stepX * deltaTime / VelocityData::stepTime;
+				vd.y += vd.stepY * deltaTime / VelocityData::stepTime;
+				vd.z += vd.stepZ * deltaTime / VelocityData::stepTime;
 			}
 		}
+		vd.duration -= deltaTime;
 	}
-	vd.duration -= deltaTime;
 
-	vd.lastRun = *ptr_engineTime;
+	vd.lastRun = *F4::ptr_engineTime;
 	return deltaTime;
 }
 
-class CharacterMoveEventWatcher {
-public:
-	typedef BSEventNotifyControl (CharacterMoveEventWatcher::* FnProcessEvent)(bhkCharacterMoveFinishEvent& evn, BSTEventSource<bhkCharacterMoveFinishEvent>* dispatcher);
-
-	BSEventNotifyControl HookedProcessEvent(bhkCharacterMoveFinishEvent& evn, BSTEventSource<bhkCharacterMoveFinishEvent>* src) {
-		Actor* a = (Actor*)((uintptr_t)this - 0x150);
-		if (a && a->loadedData) {
-			mapLock.lock();
-			auto result = velMap.find(a);
-			if (result != velMap.end()) {
-				if (a->Get3D() && !a->IsDead(true)) {
-					VelocityData& data = result->second;
-					auto qresult = queueMap.find(a);
-					if (qresult != queueMap.end()) {
-						VelocityData& queueData = qresult->second;
-						if (queueData.additive) {
-							data.x += queueData.x;
-							data.y += queueData.y;
-							data.z += queueData.z;
-						}
-						else {
-							data.x = queueData.x;
-							data.y = queueData.y;
-							data.z = queueData.z;
-						}
-						data.duration = queueData.duration;
-						data.stepX = queueData.stepX;
-						data.stepY = queueData.stepY;
-						data.stepZ = queueData.stepZ;
-						queueMap.erase(a);
-					}
-					if (data.duration <= 0) {
-						int32_t iSyncJumpState = 0;
-						a->GetGraphVariableImplInt("iSyncJumpState", iSyncJumpState);
-						if (iSyncJumpState > 0) {
-							if (IsOnGround(a)) {
-								a->NotifyAnimationGraphImpl("jumpLand");
-							}
-							else {
-								NiPointer<bhkCharacterController> con = a->currentProcess->middleHigh->charController;
-								con->context.currentState = hknpCharacterState::hknpCharacterStateType::kInAir;
-							}
-						}
-						velMap.erase(result);
-					}
-					else {
-						ApplyVelocity(a, data, true);
-					}
+void HookedUpdate(ProcessLists* list, float deltaTime, bool instant)
+{
+	mapLock.lock();
+	for (auto& [a, data] : velMap) {
+		if (a->Get3D() && !a->IsDead(true)) {
+			auto qresult = queueMap.find(a);
+			if (qresult != queueMap.end()) {
+				VelocityData& queueData = qresult->second;
+				if (queueData.additive) {
+					data.x += queueData.x;
+					data.y += queueData.y;
+					data.z += queueData.z;
+				} else {
+					data.x = queueData.x;
+					data.y = queueData.y;
+					data.z = queueData.z;
 				}
-				else {
-					logger::warn(_MESSAGE("Actor %llx is dead or not loaded", a));
-					velMap.erase(a);
-				}
+				data.duration = queueData.duration;
+				data.stepX = queueData.stepX;
+				data.stepY = queueData.stepY;
+				data.stepZ = queueData.stepZ;
+				queueMap.erase(a);
 			}
-			mapLock.unlock();
+			if (data.duration <= 0) {
+				int32_t iSyncJumpState = 0;
+				a->GetGraphVariableImplInt("iSyncJumpState", iSyncJumpState);
+				if (iSyncJumpState > 0) {
+					if (IsOnGround(a)) {
+						a->NotifyAnimationGraphImpl("jumpLand");
+					} else {
+						NiPointer<bhkCharacterController> con = a->currentProcess->middleHigh->charController;
+						con->context.currentState = hknpCharacterState::hknpCharacterStateType::kInAir;
+					}
+				}
+				velMap.erase(a);
+			} else {
+				ApplyVelocity(a, data, true);
+			}
+		} else {
+			_MESSAGE("Actor %llx is dead or not loaded", a);
+			velMap.erase(a);
 		}
-		FnProcessEvent fn = fnHash.at(*(uint64_t*)this);
-		return fn ? (this->*fn)(evn, src) : BSEventNotifyControl::kContinue;
 	}
-
-	void HookSink(uintptr_t vtable) {
-		auto it = fnHash.find(vtable);
-		if (it == fnHash.end()) {
-			FnProcessEvent fn = SafeWrite64Function(vtable + 0x8, &CharacterMoveEventWatcher::HookedProcessEvent);
-			fnHash.insert(std::pair<uint64_t, FnProcessEvent>(vtable, fn));
-		}
-	}
-
-	void UnHookSink(uintptr_t vtable) {
-		auto it = fnHash.find(vtable);
-		if (it == fnHash.end())
-			return;
-		SafeWrite64Function(vtable + 0x8, it->second);
-		fnHash.erase(it);
-	}
-
-	F4_HEAP_REDEFINE_NEW(CharacterMoveEventWatcher);
-protected:
-	static unordered_map<uint64_t, FnProcessEvent> fnHash;
-};
-unordered_map<uint64_t, CharacterMoveEventWatcher::FnProcessEvent> CharacterMoveEventWatcher::fnHash;
+	mapLock.unlock();
+	typedef void (*FnUpdate)(ProcessLists*, float, bool);
+	FnUpdate fn = (FnUpdate)RunActorUpdatesOrig;
+	if (fn)
+		(*fn)(list, deltaTime, instant);
+}
 
 std::vector<float> GetActorForward(std::monostate, Actor* a) {
 	std::vector<float> result = std::vector<float>({ 0, 0, 0 });
@@ -287,7 +227,7 @@ extern "C" DLLEXPORT void F4SEAPI SetVelocity(std::monostate, Actor * a, float x
 		data.stepY = (y2 - y) / (dur / VelocityData::stepTime);
 		data.stepZ = (z2 - z) / (dur / VelocityData::stepTime);
 		data.gravity = grav;
-		data.lastRun = *ptr_engineTime;
+		data.lastRun = *F4::ptr_engineTime;
 		queueMap.insert(std::pair<Actor*, VelocityData>(a, data));
 	}
 	else {
@@ -301,7 +241,7 @@ extern "C" DLLEXPORT void F4SEAPI SetVelocity(std::monostate, Actor * a, float x
 		data.stepY = (y2 - y) / (dur / VelocityData::stepTime);
 		data.stepZ = (z2 - z) / (dur / VelocityData::stepTime);
 		data.gravity = grav;
-		data.lastRun = *ptr_engineTime;
+		data.lastRun = *F4::ptr_engineTime;
 		velMap.insert(std::pair<Actor*, VelocityData>(a, data));
 	}
 	mapLock.unlock();
@@ -315,12 +255,12 @@ extern "C" DLLEXPORT void F4SEAPI AddVelocity(std::monostate, Actor * a, float x
 	if (it != velMap.end()) {
 		//logger::warn(_MESSAGE("Actor found on the map. Inserting queue"));
 		VelocityData data = it->second;
-		data.x = x / HAVOKtoFO4;
-		data.y = y / HAVOKtoFO4;
-		data.z = z / HAVOKtoFO4;
-		data.duration = 0.1f;
+		data.x += x / HAVOKtoFO4;
+		data.y += y / HAVOKtoFO4;
+		data.z += z / HAVOKtoFO4;
+		data.duration = 0.0001f;
 		data.additive = true;
-		data.lastRun = *ptr_engineTime;
+		data.lastRun = *F4::ptr_engineTime;
 		queueMap.insert(std::pair<Actor*, VelocityData>(a, data));
 	}
 	else {
@@ -329,9 +269,9 @@ extern "C" DLLEXPORT void F4SEAPI AddVelocity(std::monostate, Actor * a, float x
 		data.x = x / HAVOKtoFO4;
 		data.y = y / HAVOKtoFO4;
 		data.z = z / HAVOKtoFO4;
-		data.duration = 0.1f;
+		data.duration = 0.0001f;
 		data.additive = true;
-		data.lastRun = *ptr_engineTime;
+		data.lastRun = *F4::ptr_engineTime;
 		velMap.insert(std::pair<Actor*, VelocityData>(a, data));
 	}
 	mapLock.unlock();
@@ -349,19 +289,19 @@ void SetPositionQuick(std::monostate, Actor* a, float x, float y, float z) {
 				uintptr_t charProxy = *(uintptr_t*)((uintptr_t)con + 0x470);
 				if (charProxy) {
 					hkTransform* charProxyTransform = (hkTransform*)(charProxy + 0x40);
-					charProxyTransform->m_translation.x = x / HAVOKtoFO4;
-					charProxyTransform->m_translation.y = y / HAVOKtoFO4;
-					charProxyTransform->m_translation.z = z / HAVOKtoFO4;
+					charProxyTransform->m_translation.v.x = x / HAVOKtoFO4;
+					charProxyTransform->m_translation.v.y = y / HAVOKtoFO4;
+					charProxyTransform->m_translation.v.z = z / HAVOKtoFO4;
 					//logger::warn(_MESSAGE("(SetPositionQuick) Orig %f %f %f Havok %f %f %f", x, y, z, charProxyTransform->m_translation.x, charProxyTransform->m_translation.y, charProxyTransform->m_translation.z));
 				}
 			}
 		}
 		else {
-			logger::warn(_MESSAGE("(SetPositionQuick) Failed to run on Actor %llx", a->formID));
+			_MESSAGE("(SetPositionQuick) Failed to run on Actor %llx", a->formID);
 		}
 	}
 	else {
-		logger::warn(_MESSAGE("(SetPositionQuick) Actor is null"));
+		_MESSAGE("(SetPositionQuick) Actor is null");
 	}
 }
 
@@ -381,11 +321,11 @@ void SetAngleQuick(std::monostate, Actor* a, float x, float y, float z) {
 			a->data.angle.z = z;
 		}
 		else {
-			logger::warn(_MESSAGE("(SetAngleQuick) Failed to run on Actor %llx", a->formID));
+			_MESSAGE("(SetAngleQuick) Failed to run on Actor %llx", a->formID);
 		}
 	}
 	else {
-		logger::warn(_MESSAGE("(SetAngleQuick) Actor is null"));
+		_MESSAGE("(SetAngleQuick) Actor is null");
 	}
 }
 
@@ -411,20 +351,12 @@ bool RegisterFuncs(BSScript::IVirtualMachine* a_vm) {
 }
 
 void InitializePlugin() {
-	uint64_t PCVtable = REL::Relocation<uint64_t>{PlayerCharacter::VTABLE[13]}.address();
-	uint64_t ActorVtable = REL::Relocation<uint64_t>{ Actor::VTABLE[13] }.address();
-	CharacterMoveEventWatcher* PCWatcher = new CharacterMoveEventWatcher();
-	CharacterMoveEventWatcher* ActorWatcher = new CharacterMoveEventWatcher();
-	PCWatcher->HookSink(PCVtable);
-	ActorWatcher->HookSink(ActorVtable);
 	p = PlayerCharacter::GetSingleton();
 	//WorldUpdateWatcher* world = (WorldUpdateWatcher * )(**ptr_bhkWorldM);
 	//world->HookSink();
-	for (auto it = INISettingCollection::GetSingleton()->settings.begin(); it != INIPrefSettingCollection::GetSingleton()->settings.end(); ++it) {
-		if (strcmp((*it)->_key, "fInAirFallingCharGravityMult:Havok") == 0) {
-			charGravity = *it;
-			_MESSAGE("Setting %s found", (*it)->_key);
-		}
+	Setting* fInAirFallingCharGravityMult = INISettingCollection::GetSingleton()->GetSetting("fInAirFallingCharGravityMult:Havok");
+	if (fInAirFallingCharGravityMult) {
+		charGravity = fInAirFallingCharGravityMult;
 	}
 }
 
@@ -471,12 +403,17 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Query(const F4SE::QueryInterface* a
 		return false;
 	}
 
+	F4SE::AllocTrampoline(8 * 8);
+
 	return true;
 }
 
 extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f4se)
 {
 	F4SE::Init(a_f4se);
+
+	F4SE::Trampoline& trampoline = F4SE::GetTrampoline();
+	RunActorUpdatesOrig = trampoline.write_call<5>(ptr_RunActorUpdates.address(), &HookedUpdate);
 
 	const F4SE::PapyrusInterface* papyrus = F4SE::GetPapyrusInterface();
 	bool succ = papyrus->Register(RegisterFuncs);
