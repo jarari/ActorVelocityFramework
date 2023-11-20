@@ -62,12 +62,12 @@ float ApplyVelocity(Actor* a, VelocityData& vd, bool modifyState = false) {
 		if (charProxy) {
 			hkVector4f* charProxyVel = (hkVector4f*)(charProxy + 0xA0);
 			con->velocityTime = con->stepInfo.deltaTime.storage;
-			con->flags &= 0xFFFFF8FF;
+			con->flags = con->flags & ~((uint32_t)0xFF00) | (uint32_t)0x8600;
 			con->fallStartHeight = a->data.location.z;
 			con->fallTime = 0;
 			if (IsOnGround(con.get())) {
 				hkTransform* charProxyTransform = (hkTransform*)(charProxy + 0x40);
-				charProxyTransform->m_translation.v.z += 0.1f;
+				charProxyTransform->m_translation.v.z += 0.05f;
 			}
 			if (modifyState) {
 				if (con->context.currentState != hknpCharacterState::hknpCharacterStateType::kInAir) {
@@ -219,28 +219,30 @@ extern "C" DLLEXPORT void F4SEAPI SetVelocity(std::monostate, Actor * a, float x
 	if (it != velMap.end()) {
 		//logger::warn(_MESSAGE("Actor found on the map. Inserting queue"));
 		VelocityData data = it->second;
-		data.x = x;
-		data.y = y;
-		data.z = z;
+		data.x = x / HAVOKtoFO4;
+		data.y = y / HAVOKtoFO4;
+		data.z = z / HAVOKtoFO4;
 		data.duration = dur;
-		data.stepX = (x2 - x) / (dur / VelocityData::stepTime);
-		data.stepY = (y2 - y) / (dur / VelocityData::stepTime);
-		data.stepZ = (z2 - z) / (dur / VelocityData::stepTime);
+		data.stepX = (x2 - x) / (dur / VelocityData::stepTime) / HAVOKtoFO4;
+		data.stepY = (y2 - y) / (dur / VelocityData::stepTime) / HAVOKtoFO4;
+		data.stepZ = (z2 - z) / (dur / VelocityData::stepTime) / HAVOKtoFO4;
 		data.gravity = grav;
+		data.additive = false;
 		data.lastRun = *F4::ptr_engineTime;
 		queueMap.insert(std::pair<Actor*, VelocityData>(a, data));
 	}
 	else {
 		//logger::warn(_MESSAGE("Actor not found on the map. Creating data"));
 		VelocityData data = VelocityData();
-		data.x = x;
-		data.y = y;
-		data.z = z;
+		data.x = x / HAVOKtoFO4;
+		data.y = y / HAVOKtoFO4;
+		data.z = z / HAVOKtoFO4;
 		data.duration = dur;
-		data.stepX = (x2 - x) / (dur / VelocityData::stepTime);
-		data.stepY = (y2 - y) / (dur / VelocityData::stepTime);
-		data.stepZ = (z2 - z) / (dur / VelocityData::stepTime);
+		data.stepX = (x2 - x) / (dur / VelocityData::stepTime) / HAVOKtoFO4;
+		data.stepY = (y2 - y) / (dur / VelocityData::stepTime) / HAVOKtoFO4;
+		data.stepZ = (z2 - z) / (dur / VelocityData::stepTime) / HAVOKtoFO4;
 		data.gravity = grav;
+		data.additive = false;
 		data.lastRun = *F4::ptr_engineTime;
 		velMap.insert(std::pair<Actor*, VelocityData>(a, data));
 	}
