@@ -62,20 +62,8 @@ float ApplyVelocity(Actor* a, VelocityData& vd, bool modifyState = false) {
 		if (charProxy) {
 			hkVector4f* charProxyVel = (hkVector4f*)(charProxy + 0xA0);
 			con->velocityTime = con->stepInfo.deltaTime.storage;
-			con->flags = con->flags & ~((uint32_t)0xFF00) | (uint32_t)0x8600;
 			con->fallStartHeight = a->data.location.z;
 			con->fallTime = 0;
-			if (IsOnGround(con.get())) {
-				hkTransform* charProxyTransform = (hkTransform*)(charProxy + 0x40);
-				charProxyTransform->m_translation.v.z += 0.05f;
-			}
-			if (modifyState) {
-				if (con->context.currentState != hknpCharacterState::hknpCharacterStateType::kInAir) {
-					con->wantState = hknpCharacterState::hknpCharacterStateType::kInAir;
-					con->context.currentState = hknpCharacterState::hknpCharacterStateType::kInAir;
-					con->UpdateState();
-				}
-			}
 			if (vd.additive) {
 				//_MESSAGE("Actor %llx Controller %llx x %f y % f z %f onGround %d", a, con.get(), vd.x, vd.y, vd.z, (con->flags & 0x100) == 0x100);
 				charProxyVel->x += vd.x;
@@ -88,17 +76,31 @@ float ApplyVelocity(Actor* a, VelocityData& vd, bool modifyState = false) {
 			} else {
 				if (vd.gravity) {
 					if (!IsOnGround(con.get())) {
-						vd.z -= con->gravity * charGravity->GetFloat() * 9.81f * deltaTime / VelocityData::stepTime;
+						vd.z -= con->gravity * charGravity->GetFloat() * 9.81f * deltaTime / VelocityData::stepTime / HAVOKtoFO4;
 					}
 				}
 				//_MESSAGE("Actor %llx Controller %llx x %f y % f z %f onGround %d", a, con.get(), vd.x, vd.y, vd.z, (con->flags & 0x100) == 0x100);
-				charProxyVel->x = vd.x;
-				charProxyVel->y = vd.y;
-				charProxyVel->z = vd.z;
+				NiPoint3 right = CrossProduct(con->forwardVec, con->up);
+				NiPoint3 airControl = (con->forwardVec * con->direction.y + right * con->direction.x) * con->speedPct;
+				charProxyVel->x = vd.x - airControl.x;
+				charProxyVel->y = vd.y - airControl.y;
+				charProxyVel->z = vd.z - airControl.z;
 				vd.x += vd.stepX * deltaTime / VelocityData::stepTime;
 				vd.y += vd.stepY * deltaTime / VelocityData::stepTime;
 				vd.z += vd.stepZ * deltaTime / VelocityData::stepTime;
 			}
+			if (IsOnGround(con.get())) {
+				hkTransform* charProxyTransform = (hkTransform*)(charProxy + 0x40);
+				charProxyTransform->m_translation.v.z += 0.05f;
+			}
+			if (modifyState) {
+				if (con->context.currentState != hknpCharacterState::hknpCharacterStateType::kInAir) {
+					con->wantState = hknpCharacterState::hknpCharacterStateType::kInAir;
+					con->context.currentState = hknpCharacterState::hknpCharacterStateType::kInAir;
+					con->UpdateState();
+				}
+			}
+			con->flags = con->flags & ~((uint32_t)0xFE00) | (uint32_t)0x8600;
 		}
 		vd.duration -= deltaTime;
 	}
@@ -257,13 +259,14 @@ extern "C" DLLEXPORT void F4SEAPI AddVelocity(std::monostate, Actor * a, float x
 	if (it != velMap.end()) {
 		//logger::warn(_MESSAGE("Actor found on the map. Inserting queue"));
 		VelocityData data = it->second;
-		data.x += x / HAVOKtoFO4;
-		data.y += y / HAVOKtoFO4;
-		data.z += z / HAVOKtoFO4;
-		data.duration = 0.0001f;
-		data.additive = true;
-		data.lastRun = *F4::ptr_engineTime;
-		queueMap.insert(std::pair<Actor*, VelocityData>(a, data));
+		if (data.additive) {
+			data.x += x / HAVOKtoFO4;
+			data.y += y / HAVOKtoFO4;
+			data.z += z / HAVOKtoFO4;
+			data.duration = 0.0001f;
+			data.lastRun = *F4::ptr_engineTime;
+			queueMap.insert(std::pair<Actor*, VelocityData>(a, data));
+		}
 	}
 	else {
 		//logger::warn(_MESSAGE("Actor not found on the map. Creating data"));
