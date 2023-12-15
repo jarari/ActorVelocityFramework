@@ -35,6 +35,7 @@ unordered_map<Actor*, VelocityData> queueMap;
 PlayerCharacter* p;
 BSSpinLock mapLock;
 Setting* charGravity;
+bhkPickData* pick;
 
 bool IsOnGround(bhkCharacterController* con) {
 	return (con->flags & 0x100) == 0x100 || con->context.currentState == hknpCharacterState::hknpCharacterStateType::kOnGround;
@@ -61,46 +62,52 @@ float ApplyVelocity(Actor* a, VelocityData& vd, bool modifyState = false) {
 		uintptr_t charProxy = *(uintptr_t*)((uintptr_t)con.get() + 0x470);
 		if (charProxy) {
 			hkVector4f* charProxyVel = (hkVector4f*)(charProxy + 0xA0);
-			con->velocityTime = con->stepInfo.deltaTime.storage;
-			con->fallStartHeight = a->data.location.z;
-			con->fallTime = 0;
+			hkTransform* charProxyTransform = (hkTransform*)(charProxy + 0x40);
 			if (vd.additive) {
-				//_MESSAGE("Actor %llx Controller %llx x %f y % f z %f onGround %d", a, con.get(), vd.x, vd.y, vd.z, (con->flags & 0x100) == 0x100);
-				charProxyVel->x += vd.x;
-				charProxyVel->y += vd.y;
-				charProxyVel->z += vd.z;
+				//charProxyVel isn't used when the controller is on ground
+				if (IsOnGround(con.get())) {
+					charProxyTransform->m_translation.v.z += 0.05f;
+				}
+				charProxyVel->x += vd.x / HAVOKtoFO4;
+				charProxyVel->y += vd.y / HAVOKtoFO4;
+				charProxyVel->z += vd.z / HAVOKtoFO4;
 				vd.x = 0;
 				vd.y = 0;
 				vd.z = 0;
 				//_MESSAGE("Actor %llx Controller %llx x %f y % f z %f onGround %d", a, con.get(), charProxyVel->x, charProxyVel->y, charProxyVel->z, (con->flags & 0x100) == 0x100);
 			} else {
+				//Gravity calc
 				if (vd.gravity) {
 					if (!IsOnGround(con.get())) {
-						vd.z -= con->gravity * charGravity->GetFloat() * 9.81f * deltaTime / VelocityData::stepTime / HAVOKtoFO4;
+						vd.z -= con->gravity * charGravity->GetFloat() * 9.81f * deltaTime / VelocityData::stepTime;
 					}
 				}
 				//_MESSAGE("Actor %llx Controller %llx x %f y % f z %f onGround %d", a, con.get(), vd.x, vd.y, vd.z, (con->flags & 0x100) == 0x100);
-				NiPoint3 right = CrossProduct(con->forwardVec, con->up);
-				NiPoint3 airControl = (con->forwardVec * con->direction.y + right * con->direction.x) * con->speedPct;
-				charProxyVel->x = vd.x - airControl.x;
-				charProxyVel->y = vd.y - airControl.y;
-				charProxyVel->z = vd.z - airControl.z;
+				if (IsOnGround(con.get())) {
+					//Translate z upwards only when vd.z is positive
+					if (vd.z > 0 || !vd.gravity) {
+						charProxyTransform->m_translation.v.z += 0.05f;
+					}
+					con->velocityTime = deltaTime;
+					con->outVelocity = hkVector4f(vd.x, vd.y, vd.z);
+					con->velocityMod = con->outVelocity;
+				} else {
+					charProxyVel->x = vd.x / HAVOKtoFO4;
+					charProxyVel->y = vd.y / HAVOKtoFO4;
+					charProxyVel->z = vd.z / HAVOKtoFO4;
+				}
 				vd.x += vd.stepX * deltaTime / VelocityData::stepTime;
 				vd.y += vd.stepY * deltaTime / VelocityData::stepTime;
 				vd.z += vd.stepZ * deltaTime / VelocityData::stepTime;
 			}
-			if (IsOnGround(con.get())) {
-				hkTransform* charProxyTransform = (hkTransform*)(charProxy + 0x40);
-				charProxyTransform->m_translation.v.z += 0.05f;
+			if (vd.z >= 0) {
+				con->fallStartHeight = a->data.location.z;
+				con->fallTime = 0;
 			}
+			con->flags = con->flags & ~((uint32_t)0xFE00) | (uint32_t)0x8700;
 			if (modifyState) {
-				if (con->context.currentState != hknpCharacterState::hknpCharacterStateType::kInAir) {
-					con->wantState = hknpCharacterState::hknpCharacterStateType::kInAir;
-					con->context.currentState = hknpCharacterState::hknpCharacterStateType::kInAir;
-					con->UpdateState();
-				}
+				con->context.currentState = hknpCharacterState::hknpCharacterStateType::kInAir;
 			}
-			con->flags = con->flags & ~((uint32_t)0xFE00) | (uint32_t)0x8600;
 		}
 		vd.duration -= deltaTime;
 	}
@@ -221,13 +228,13 @@ extern "C" DLLEXPORT void F4SEAPI SetVelocity(std::monostate, Actor * a, float x
 	if (it != velMap.end()) {
 		//logger::warn(_MESSAGE("Actor found on the map. Inserting queue"));
 		VelocityData data = it->second;
-		data.x = x / HAVOKtoFO4;
-		data.y = y / HAVOKtoFO4;
-		data.z = z / HAVOKtoFO4;
+		data.x = x;
+		data.y = y;
+		data.z = z;
 		data.duration = dur;
-		data.stepX = (x2 - x) / (dur / VelocityData::stepTime) / HAVOKtoFO4;
-		data.stepY = (y2 - y) / (dur / VelocityData::stepTime) / HAVOKtoFO4;
-		data.stepZ = (z2 - z) / (dur / VelocityData::stepTime) / HAVOKtoFO4;
+		data.stepX = (x2 - x) / (dur / VelocityData::stepTime);
+		data.stepY = (y2 - y) / (dur / VelocityData::stepTime);
+		data.stepZ = (z2 - z) / (dur / VelocityData::stepTime);
 		data.gravity = grav;
 		data.additive = false;
 		data.lastRun = *F4::ptr_engineTime;
@@ -236,13 +243,13 @@ extern "C" DLLEXPORT void F4SEAPI SetVelocity(std::monostate, Actor * a, float x
 	else {
 		//logger::warn(_MESSAGE("Actor not found on the map. Creating data"));
 		VelocityData data = VelocityData();
-		data.x = x / HAVOKtoFO4;
-		data.y = y / HAVOKtoFO4;
-		data.z = z / HAVOKtoFO4;
+		data.x = x;
+		data.y = y;
+		data.z = z;
 		data.duration = dur;
-		data.stepX = (x2 - x) / (dur / VelocityData::stepTime) / HAVOKtoFO4;
-		data.stepY = (y2 - y) / (dur / VelocityData::stepTime) / HAVOKtoFO4;
-		data.stepZ = (z2 - z) / (dur / VelocityData::stepTime) / HAVOKtoFO4;
+		data.stepX = (x2 - x) / (dur / VelocityData::stepTime);
+		data.stepY = (y2 - y) / (dur / VelocityData::stepTime);
+		data.stepZ = (z2 - z) / (dur / VelocityData::stepTime);
 		data.gravity = grav;
 		data.additive = false;
 		data.lastRun = *F4::ptr_engineTime;
@@ -260,9 +267,9 @@ extern "C" DLLEXPORT void F4SEAPI AddVelocity(std::monostate, Actor * a, float x
 		//logger::warn(_MESSAGE("Actor found on the map. Inserting queue"));
 		VelocityData data = it->second;
 		if (data.additive) {
-			data.x += x / HAVOKtoFO4;
-			data.y += y / HAVOKtoFO4;
-			data.z += z / HAVOKtoFO4;
+			data.x += x;
+			data.y += y;
+			data.z += z;
 			data.duration = 0.0001f;
 			data.lastRun = *F4::ptr_engineTime;
 			queueMap.insert(std::pair<Actor*, VelocityData>(a, data));
@@ -271,9 +278,9 @@ extern "C" DLLEXPORT void F4SEAPI AddVelocity(std::monostate, Actor * a, float x
 	else {
 		//logger::warn(_MESSAGE("Actor not found on the map. Creating data"));
 		VelocityData data = VelocityData();
-		data.x = x / HAVOKtoFO4;
-		data.y = y / HAVOKtoFO4;
-		data.z = z / HAVOKtoFO4;
+		data.x = x;
+		data.y = y;
+		data.z = z;
 		data.duration = 0.0001f;
 		data.additive = true;
 		data.lastRun = *F4::ptr_engineTime;
@@ -363,6 +370,8 @@ void InitializePlugin() {
 	if (fInAirFallingCharGravityMult) {
 		charGravity = fInAirFallingCharGravityMult;
 	}
+	pick = malloc<bhkPickData>();
+	new (pick) bhkPickData();
 }
 
 extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Query(const F4SE::QueryInterface* a_f4se, F4SE::PluginInfo* a_info)
